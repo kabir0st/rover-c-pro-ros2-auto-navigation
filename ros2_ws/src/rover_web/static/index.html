@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>RoverC</title>
+<style>
+:root{color-scheme:dark}
+body{margin:0;padding:16px;background:#111;color:#eee;font-family:system-ui,sans-serif;
+  display:flex;flex-direction:column;align-items:center;gap:16px;
+  user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
+h1{margin:0;font-size:20px}
+#st{font-size:14px;min-height:1.2em;text-align:center}
+.ok{color:#4c8}.warn{color:#db4}.error{color:#e55}
+.pad{display:grid;grid-template-columns:repeat(3,80px);gap:8px}
+.turn{display:flex;gap:8px}
+.turn button{width:124px}
+button{height:80px;border:0;border-radius:12px;background:#333;color:#eee;font-size:30px;touch-action:none}
+button.on{background:#2a7}
+#stop{background:#a33}
+#lock{width:256px;height:48px;font-size:16px}
+#lock.locked{background:#a33}
+label{display:flex;flex-direction:column;gap:6px;width:256px;font-size:14px}
+.panel{width:256px;display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:14px;
+  font-variant-numeric:tabular-nums}
+.panel span:nth-child(odd){color:#999}
+</style></head><body>
+<h1>RoverC</h1>
+<div id="st" class="warn">connecting…</div>
+
+<!-- data-vx / data-vy / data-wz are ROS /cmd_vel directions:
+     vx+ = forward, vy+ = left, wz+ = turn left (counter-clockwise). -->
+<div class="pad">
+  <button data-vx="1" data-vy="1">&#8598;</button>
+  <button data-vx="1">&#8593;</button>
+  <button data-vx="1" data-vy="-1">&#8599;</button>
+  <button data-vy="1">&#8592;</button>
+  <button id="stop">&#9632;</button>
+  <button data-vy="-1">&#8594;</button>
+  <button data-vx="-1" data-vy="1">&#8601;</button>
+  <button data-vx="-1">&#8595;</button>
+  <button data-vx="-1" data-vy="-1">&#8600;</button>
+</div>
+<div class="turn">
+  <button data-wz="1">&#10226;</button>
+  <button data-wz="-1">&#10227;</button>
+</div>
+
+<label>Speed: <span id="sv">60</span>%<input id="speed" type="range" min="20" max="100" value="60"></label>
+<label>Gripper<input id="grip" type="range" min="10" max="90" value="50"></label>
+<button id="lock">Lock</button>
+
+<div class="panel">
+  <span>Battery</span><span id="batt">–</span>
+  <span>WiFi</span><span id="rssi">–</span>
+  <span>Accel m/s²</span><span id="acc">–</span>
+  <span>Gyro rad/s</span><span id="gyr">–</span>
+  <span>Viewers</span><span id="view">–</span>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const speed = $('speed'), grip = $('grip'), lockBtn = $('lock'), st = $('st');
+const STOP = 'vx=0&vy=0&wz=0';
+let cmd = STOP, timer = null, busy = false, locked = false;
+
+function showStatus(level, text) {
+  st.className = level;
+  st.textContent = text;
+}
+
+// ---- Driving: hold to move, release to stop ----
+function send(force) {
+  if (busy && !force) return;   // don't pile up requests on a slow link
+  busy = true;
+  fetch('/drive?' + cmd)
+    .catch(() => showStatus('error', 'no connection to the ROS web node'))
+    .finally(() => busy = false);
+}
+function go(b) {
+  const s = speed.value / 100, d = b.dataset;
+  cmd = `vx=${(d.vx || 0) * s}&vy=${(d.vy || 0) * s}&wz=${(d.wz || 0) * s}`;
+  b.classList.add('on');
+  send(true);
+  clearInterval(timer);
+  timer = setInterval(send, 150);
+}
+function halt(b) {
+  if (b) b.classList.remove('on');
+  clearInterval(timer);
+  timer = null;
+  cmd = STOP;
+  send(true);
+}
+document.querySelectorAll('.pad button, .turn button').forEach(b => {
+  b.addEventListener('pointerdown', e => { b.setPointerCapture(e.pointerId); go(b); });
+  ['pointerup', 'pointercancel', 'lostpointercapture']
+    .forEach(ev => b.addEventListener(ev, () => halt(b)));
+  b.addEventListener('contextmenu', e => e.preventDefault());
+});
+window.addEventListener('blur', () => halt());
+document.addEventListener('visibilitychange', () => { if (document.hidden) halt(); });
+
+speed.oninput = () => $('sv').textContent = speed.value;
+grip.onchange = () => fetch('/grip?angle=' + grip.value);
+lockBtn.onclick = () => fetch('/lock?on=' + (locked ? 0 : 1))
+  .then(r => r.ok ? null : r.text().then(t => showStatus('error', t)));
+
+// ---- Status: poll once a second ----
+const fixed = (v, n) => v == null ? '–' : v.toFixed(n);
+
+async function poll() {
+  let s;
+  try {
+    s = await (await fetch('/status')).json();
+  } catch (e) {
+    showStatus('error', 'no connection to the ROS web node');
+    return;
+  }
+  if (s.link) showStatus(s.link.level, s.link.message);
+  else showStatus('error', 'rover_driver is not running');
+
+  locked = !!s.locked;
+  lockBtn.textContent = locked ? 'Unlock' : 'Lock';
+  lockBtn.classList.toggle('locked', locked);
+
+  const b = s.battery;
+  $('batt').textContent = b ? [
+    b.percent != null ? Math.round(b.percent * 100) + '%' : null,
+    b.voltage != null ? b.voltage.toFixed(2) + ' V' : null,
+    b.charging ? 'charging' : null,
+  ].filter(Boolean).join(' · ') || '–' : '–';
+  $('rssi').textContent = s.link && s.link.rssi != null ? s.link.rssi + ' dBm' : '–';
+  $('acc').textContent = s.imu ? s.imu.accel.map(v => fixed(v, 1)).join('  ') : '–';
+  $('gyr').textContent = s.imu ? s.imu.gyro.map(v => fixed(v, 2)).join('  ') : '–';
+  $('view').textContent = s.viewers;
+}
+poll();
+setInterval(poll, 1000);
+</script>
+</body></html>

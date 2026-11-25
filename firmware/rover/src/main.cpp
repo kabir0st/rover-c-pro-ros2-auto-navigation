@@ -1,23 +1,23 @@
-// RoverC Pro browser control for M5StickC / Plus / Plus2.
+// RoverC Pro firmware for M5StickC / Plus / Plus2: a thin UDP relay for ROS 2.
 //
-// Uses M5's own libraries: M5Unified (stick: screen, buttons) and M5-RoverC
-// (rover: motors + gripper over I2C on the hat pins G0/G26).
+// Uses M5's own libraries: M5Unified (stick: screen, buttons, IMU, battery) and
+// M5-RoverC (rover: motors + gripper over I2C on the hat pins G0/G26).
 //
-// WiFi: joins WIFI_SSID from secrets.h if set; otherwise (or if that fails)
-// it starts its own hotspot.
+// The ROS 2 driver (ros2_ws/src/rover_driver) sends drive commands over UDP at
+// 20 Hz; the rover replies with IMU and battery telemetry at 50 Hz. The packet
+// layout is in include/protocol.h.
 //
-// Screen: READY / LOCKED on top, then the network. On home WiFi it shows the
-// network name, the rover's IP and which browsers have the page open. In
-// hotspot mode it lists every device joined to the hotspot, tagged "web" if it
-// has the page open and "drive" if it is driving.
+// WiFi: joins WIFI_SSID from secrets.h if set; otherwise (or if that fails) it
+// starts its own hotspot. Reachable as roverc.local either way.
 //
-// Button A on the stick toggles a lock that stops the rover and ignores the
-// browser until pressed again.
+// Safety: the rover stops if no command arrives for 0.5 s. Button A toggles a
+// lock that stops it and ignores commands until pressed again (ROS can also
+// lock/unlock it).
 
 #include <M5Unified.h>
 #include <M5_RoverC.h>
 #include <WiFi.h>
-#include <WebServer.h>
+#include <WiFiUdp.h>
 #include <ESPmDNS.h>
 #include <esp_wifi.h>
 #include <esp_wifi_ap_get_sta_list.h>
@@ -28,78 +28,189 @@
 #error "Copy include/secrets.example.h to include/secrets.h"
 #endif
 
-#include "page.h"
+#include "protocol.h"
 
-// Stop if no drive command arrives for this long. The page resends every 150 ms.
-static const uint32_t COMMAND_TIMEOUT_MS = 500;
-// A browser counts as "page open" if it checked in this recently. The page pings every 1 s.
-static const uint32_t PAGE_OPEN_MS = 3000;
+static const uint32_t COMMAND_TIMEOUT_MS = 500;   // stop if commands stop for this long
+static const uint32_t PEER_TIMEOUT_MS = 2000;     // stop sending telemetry after this
+static const uint32_t TELEMETRY_PERIOD_MS = 20;   // 50 Hz
+static const uint32_t SLOW_PERIOD_MS = 1000;      // battery, temperature, RSSI, rates
 static const uint32_t SCREEN_REFRESH_MS = 250;
-static const int MAX_WEB_CLIENTS = 4;
 
 M5_RoverC rover;
-WebServer server(80);
+WiFiUDP udp;
 
 bool roverFound = false;
 bool locked = false;
 bool moving = false;
 bool apMode = false;
+
+// The PC running the ROS driver: whoever sent the last valid command.
+IPAddress peerIp;
+uint16_t peerPort = 0;
 uint32_t lastCommandMs = 0;
-uint32_t driverIp = 0;  // who sent the last non-zero drive command
+uint16_t lastCommandSeq = 0;
+uint16_t telemetrySeq = 0;
+uint32_t commandsThisSecond = 0;
+uint32_t commandRate = 0;  // commands per second, for the screen
 
-struct WebClient {
-  uint32_t ip;
-  uint32_t lastSeenMs;
-};
-WebClient webClients[MAX_WEB_CLIENTS] = {};
+uint8_t gripAngle = 0;  // 0 = never set
 
-String lastScreen;
+// Slow readings, refreshed once a second.
+int16_t battMv = 0;
+int16_t battMa = 0;
+int16_t vbusMv = -1;
+int8_t battPct = -1;
+int8_t chargeState = 0;
+float imuTemp = NAN;
+int8_t rssi = 0;
+
+uint32_t lastTelemetryMs = 0;
+uint32_t lastSlowMs = 0;
 uint32_t lastScreenMs = 0;
+String lastScreen;
+
+bool havePeer() {
+  return peerPort != 0 && millis() - lastCommandMs < PEER_TIMEOUT_MS;
+}
 
 void stopRover() {
   rover.setSpeed(0, 0, 0);
   moving = false;
 }
 
-// ---------- Who is using the page ----------
-
-// Record that the current request's sender is alive. Reuses its slot, or
-// takes the stalest one when the table is full.
-void noteClient() {
-  uint32_t ip = (uint32_t)server.client().remoteIP();
-  WebClient *slot = &webClients[0];
-  for (WebClient &c : webClients) {
-    if (c.ip == ip) {
-      slot = &c;
-      break;
-    }
-    if (c.lastSeenMs < slot->lastSeenMs) slot = &c;
-  }
-  slot->ip = ip;
-  slot->lastSeenMs = millis();
+void setGrip(uint8_t angle) {
+  // The gripper is on servo port 0; port 1 gets the same angle, as in M5's example.
+  gripAngle = constrain(angle, 10, 90);
+  rover.setServoAngle(0, gripAngle);
+  rover.setServoAngle(1, gripAngle);
 }
 
-bool pageOpen(uint32_t ip) {
-  for (const WebClient &c : webClients) {
-    if (c.ip == ip && millis() - c.lastSeenMs < PAGE_OPEN_MS) return true;
+// ---------- Commands from ROS ----------
+
+void applyCommand(const CommandPacket &cmd) {
+  if (cmd.flags & CMD_FLAG_LOCK) locked = true;
+  if (cmd.flags & CMD_FLAG_UNLOCK) locked = false;
+
+  if (locked) {
+    stopRover();
+    return;
   }
-  return false;
+
+  if (cmd.grip != 0 && cmd.grip != gripAngle) setGrip(cmd.grip);
+
+  int8_t x = constrain(cmd.x, -100, 100);
+  int8_t y = constrain(cmd.y, -100, 100);
+  int8_t z = constrain(cmd.z, -100, 100);
+  rover.setSpeed(x, y, z);
+  moving = (x != 0 || y != 0 || z != 0);
 }
 
-String tags(uint32_t ip) {
-  String s;
-  if (pageOpen(ip)) s += " web";
-  if (moving && ip == driverIp) s += " drive";
-  return s;
+void receiveCommands() {
+  while (udp.parsePacket() > 0) {
+    uint8_t buf[64];
+    int len = udp.read(buf, sizeof(buf));
+    if (len != sizeof(CommandPacket)) continue;
+
+    CommandPacket cmd;
+    memcpy(&cmd, buf, sizeof(cmd));
+    if (cmd.magic[0] != 'R' || cmd.magic[1] != 'C' || cmd.version != PROTOCOL_VERSION) continue;
+
+    peerIp = udp.remoteIP();
+    peerPort = udp.remotePort();
+    lastCommandMs = millis();
+    lastCommandSeq = cmd.seq;
+    commandsThisSecond++;
+    applyCommand(cmd);
+  }
+}
+
+// ---------- Telemetry to ROS ----------
+
+void sendTelemetry() {
+  TelemetryPacket t = {};
+  t.magic[0] = 'R';
+  t.magic[1] = 'T';
+  t.version = PROTOCOL_VERSION;
+
+  bool imuOk = M5.Imu.isEnabled() && M5.Imu.update();
+  const auto &imu = M5.Imu.getImuData();
+  for (int i = 0; i < 3; i++) {
+    t.accel[i] = imu.accel.value[i];
+    t.gyro[i] = imu.gyro.value[i];
+  }
+
+  t.flags = (locked ? TLM_FLAG_LOCKED : 0) | (roverFound ? TLM_FLAG_ROVER_FOUND : 0) |
+            (moving ? TLM_FLAG_MOVING : 0) | (imuOk ? TLM_FLAG_IMU_OK : 0);
+  t.seq = telemetrySeq++;
+  t.cmd_seq = lastCommandSeq;
+  t.uptime_ms = millis();
+  t.imu_temp = imuTemp;
+  t.batt_mv = battMv;
+  t.batt_ma = battMa;
+  t.vbus_mv = vbusMv;
+  t.batt_pct = battPct;
+  t.charge_state = chargeState;
+  t.rssi = rssi;
+  t.grip = gripAngle;
+
+  udp.beginPacket(peerIp, peerPort);
+  udp.write((const uint8_t *)&t, sizeof(t));
+  udp.endPacket();
+}
+
+// In hotspot mode, find the signal strength of the station that is the ROS PC.
+int8_t apRssiForPeer() {
+  wifi_sta_list_t stations = {};
+  wifi_sta_mac_ip_list_t withIp = {};
+  if (esp_wifi_ap_get_sta_list(&stations) != ESP_OK) return 0;
+  esp_wifi_ap_get_sta_list_with_ip(&stations, &withIp);
+  for (int i = 0; i < withIp.num && i < stations.num; i++) {
+    if (withIp.sta[i].ip.addr == (uint32_t)peerIp) return stations.sta[i].rssi;
+  }
+  return 0;
+}
+
+void readSlowSensors() {
+  battMv = M5.Power.getBatteryVoltage();
+  battMa = (int16_t)constrain(M5.Power.getBatteryCurrent(), -32768, 32767);
+  vbusMv = M5.Power.getVBUSVoltage();
+  battPct = (int8_t)constrain(M5.Power.getBatteryLevel(), -1, 100);
+  chargeState = (int8_t)M5.Power.getChargeState();
+
+  float t;
+  imuTemp = M5.Imu.getTemp(&t) ? t : NAN;
+
+  if (apMode) {
+    rssi = havePeer() ? apRssiForPeer() : 0;
+  } else {
+    rssi = WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0;
+  }
+
+  commandRate = commandsThisSecond;
+  commandsThisSecond = 0;
 }
 
 // ---------- Screen ----------
+
+String batteryText() {
+  String s = "Batt ";
+  if (battPct >= 0) s += String(battPct) + "% ";
+  if (battMv > 0) s += String(battMv / 1000.0f, 2) + "V";
+  if (chargeState == (int8_t)m5::charge_state_t::charging) s += " chg";
+  return s + "\n";
+}
+
+String rosText() {
+  if (!havePeer()) return "ROS: waiting\n";
+  return "ROS " + peerIp.toString() + "\n " + String(commandRate) + " cmd/s\n";
+}
 
 String networkText() {
   String s;
   if (apMode) {
     s += "AP " AP_SSID "\n";
     s += WiFi.softAPIP().toString() + "\n";
+    s += batteryText();
 
     wifi_sta_list_t stations = {};
     wifi_sta_mac_ip_list_t withIp = {};
@@ -109,11 +220,13 @@ String networkText() {
     s += "Joined (" + String(withIp.num) + "):\n";
     for (int i = 0; i < withIp.num; i++) {
       uint32_t ip = withIp.sta[i].ip.addr;
-      if (ip) {
-        s += " " + IPAddress(ip).toString() + tags(ip) + "\n";
-      } else {
+      if (!ip) {
         s += " (getting IP)\n";
+        continue;
       }
+      s += " " + IPAddress(ip).toString();
+      if (havePeer() && ip == (uint32_t)peerIp) s += " ros";
+      s += "\n";
     }
   } else {
     if (WiFi.status() == WL_CONNECTED) {
@@ -122,16 +235,8 @@ String networkText() {
     } else {
       s += "WiFi lost, retrying\n";
     }
-
-    String list;
-    int count = 0;
-    for (const WebClient &c : webClients) {
-      if (c.ip && pageOpen(c.ip)) {
-        list += " " + IPAddress(c.ip).toString() + tags(c.ip) + "\n";
-        count++;
-      }
-    }
-    s += "Browsers (" + String(count) + "):\n" + list;
+    s += batteryText();
+    s += rosText();
   }
   return s;
 }
@@ -146,6 +251,9 @@ void drawScreen() {
   } else if (locked) {
     head = "LOCKED (btn A)";
     color = TFT_RED;
+  } else if (moving) {
+    head = "DRIVING";
+    color = TFT_YELLOW;
   }
 
   String body = networkText();
@@ -161,54 +269,6 @@ void drawScreen() {
   M5.Display.print(body);
 }
 
-// ---------- Web handlers ----------
-
-String statusText() {
-  if (!roverFound) return "rover not found - check the stick is seated";
-  if (locked) return "LOCKED - press button A on the rover";
-  return "ok";
-}
-
-int8_t speedArg(const char *name) {
-  return (int8_t)constrain(server.arg(name).toInt(), -100, 100);
-}
-
-void handleDrive() {
-  noteClient();
-  if (locked) {
-    stopRover();
-  } else {
-    int8_t x = speedArg("x");
-    int8_t y = speedArg("y");
-    int8_t z = speedArg("z");
-    rover.setSpeed(x, y, z);
-    moving = (x != 0 || y != 0 || z != 0);
-    if (moving) driverIp = (uint32_t)server.client().remoteIP();
-    lastCommandMs = millis();
-  }
-  server.send(200, "text/plain", statusText());
-}
-
-void handleGrip() {
-  noteClient();
-  // Same 10..90 range M5's example uses. The gripper is on servo port 0;
-  // port 1 gets the same angle, as in M5's example.
-  uint8_t angle = constrain(server.arg("angle").toInt(), 10, 90);
-  rover.setServoAngle(0, angle);
-  rover.setServoAngle(1, angle);
-  server.send(200, "text/plain", "ok");
-}
-
-void handlePing() {
-  noteClient();
-  server.send(200, "text/plain", statusText());
-}
-
-void handlePage() {
-  noteClient();
-  server.send(200, "text/html", PAGE);
-}
-
 // ---------- Setup ----------
 
 void startWifi() {
@@ -219,14 +279,13 @@ void startWifi() {
     M5.Display.println("Joining WiFi...");
     for (int i = 0; i < 30 && WiFi.status() != WL_CONNECTED; i++) delay(500);
     if (WiFi.status() == WL_CONNECTED) {
-      MDNS.begin("roverc");  // http://roverc.local
       apMode = false;
       return;
     }
     WiFi.disconnect(true);
   }
   WiFi.mode(WIFI_AP);
-  WiFi.softAP(AP_SSID, AP_PASS);  // http://192.168.4.1
+  WiFi.softAP(AP_SSID, AP_PASS);  // rover is 192.168.4.1
   apMode = true;
 }
 
@@ -241,21 +300,18 @@ void setup() {
   stopRover();
 
   startWifi();
+  MDNS.begin("roverc");  // roverc.local
+  udp.begin(ROVER_UDP_PORT);
 
-  server.on("/", handlePage);
-  server.on("/drive", handleDrive);
-  server.on("/grip", handleGrip);
-  server.on("/ping", handlePing);
-  server.begin();
-
-  Serial.printf("RoverC %s, open http://%s\n", roverFound ? "found" : "NOT found",
-                (apMode ? WiFi.softAPIP() : WiFi.localIP()).toString().c_str());
+  readSlowSensors();
+  Serial.printf("RoverC %s, listening on %s:%d\n", roverFound ? "found" : "NOT found",
+                (apMode ? WiFi.softAPIP() : WiFi.localIP()).toString().c_str(), ROVER_UDP_PORT);
   drawScreen();
 }
 
 void loop() {
   M5.update();
-  server.handleClient();
+  receiveCommands();
 
   if (M5.BtnA.wasPressed()) {
     locked = !locked;
@@ -263,12 +319,22 @@ void loop() {
     drawScreen();
   }
 
-  if (moving && millis() - lastCommandMs > COMMAND_TIMEOUT_MS) {
-    stopRover();
+  uint32_t now = millis();
+
+  if (moving && now - lastCommandMs > COMMAND_TIMEOUT_MS) stopRover();
+
+  if (havePeer() && now - lastTelemetryMs >= TELEMETRY_PERIOD_MS) {
+    lastTelemetryMs = now;
+    sendTelemetry();
   }
 
-  if (millis() - lastScreenMs >= SCREEN_REFRESH_MS) {
-    lastScreenMs = millis();
+  if (now - lastSlowMs >= SLOW_PERIOD_MS) {
+    lastSlowMs = now;
+    readSlowSensors();
+  }
+
+  if (now - lastScreenMs >= SCREEN_REFRESH_MS) {
+    lastScreenMs = now;
     drawScreen();
   }
 }

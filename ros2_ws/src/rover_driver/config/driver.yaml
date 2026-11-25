@@ -1,0 +1,13 @@
+rover_driver:
+  ros__parameters:
+    # rover_host comes from the launch file argument (default roverc.local).
+    rover_port: 4210
+    send_rate: 20.0           # Hz; the rover stops if commands stop for 0.5 s
+    cmd_timeout: 0.5          # s; send zeros if /cmd_vel goes quiet this long
+    # The rover has no wheel encoders, so these are estimates of the speed at
+    # 100 % motor power. Measure and adjust. Keep rover_web's values the same.
+    max_linear_speed: 0.3     # m/s
+    max_angular_speed: 2.0    # rad/s
+    cmd_vel_stamped: false    # true to subscribe to TwistStamped instead of Twist
+    imu_frame_id: imu_link
+    battery_frame_id: base_link

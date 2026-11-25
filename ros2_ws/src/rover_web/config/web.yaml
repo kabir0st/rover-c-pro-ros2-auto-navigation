@@ -1,0 +1,8 @@
+rover_web:
+  ros__parameters:
+    # port comes from the launch file argument (default 8080).
+    # Keep these equal to rover_driver's, so 100 % on the page is 100 % on the motors.
+    max_linear_speed: 0.3     # m/s
+    max_angular_speed: 2.0    # rad/s
+    drive_timeout: 0.5        # s; publish a stop if the page stops sending
+    cmd_vel_stamped: false
