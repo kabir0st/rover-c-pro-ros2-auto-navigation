@@ -3,58 +3,87 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
 <title>RoverC</title>
 <style>
-:root{color-scheme:dark}
-body{margin:0;padding:16px;background:#111;color:#eee;font-family:system-ui,sans-serif;
+:root{color-scheme:dark;--bg:#111;--fg:#eee;--muted:#999;--btn:#333;--go:#2a7;--stop:#a33;
+  --unknown:#181818;--free:#2c4a3a;--wall:#e5534b;--grid:rgba(255,255,255,.07);
+  --grid-major:rgba(255,255,255,.22);--path:#4aa8ff;--rover:#2a7}
+body{margin:0;padding:16px;background:var(--bg);color:var(--fg);font-family:system-ui,sans-serif;
   display:flex;flex-direction:column;align-items:center;gap:16px;
   user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
 h1{margin:0;font-size:20px}
+h2{margin:0;font-size:16px;font-weight:600}
 #st{font-size:14px;min-height:1.2em;text-align:center}
 .ok{color:#4c8}.warn{color:#db4}.error{color:#e55}
+main{display:flex;flex-wrap:wrap;justify-content:center;align-items:flex-start;gap:24px;width:100%}
+section{display:flex;flex-direction:column;align-items:center;gap:16px}
 .pad{display:grid;grid-template-columns:repeat(3,80px);gap:8px}
 .turn{display:flex;gap:8px}
 .turn button{width:124px}
-button{height:80px;border:0;border-radius:12px;background:#333;color:#eee;font-size:30px;touch-action:none}
-button.on{background:#2a7}
-#stop{background:#a33}
-#lock{width:256px;height:48px;font-size:16px}
-#lock.locked{background:#a33}
+button{height:80px;border:0;border-radius:12px;background:var(--btn);color:var(--fg);font-size:30px;touch-action:none}
+button.on{background:var(--go)}
+#stop{background:var(--stop)}
+.wide{width:256px;height:48px;font-size:16px}
+#lock.locked{background:var(--stop)}
 label{display:flex;flex-direction:column;gap:6px;width:256px;font-size:14px}
 .panel{width:256px;display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:14px;
   font-variant-numeric:tabular-nums}
-.panel span:nth-child(odd){color:#999}
+.panel span:nth-child(odd){color:var(--muted)}
+.mapbox{width:min(480px,100%)}
+#map{width:100%;aspect-ratio:1;border-radius:12px;background:var(--unknown);touch-action:none}
+.maprow{display:flex;justify-content:space-between;align-items:center;gap:12px;width:100%;
+  font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums}
+.legend{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:13px;color:var(--muted);width:100%}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px}
+#reset{width:auto;height:36px;padding:0 14px;font-size:14px}
 </style></head><body>
 <h1>RoverC</h1>
 <div id="st" class="warn">connecting…</div>
 
-<!-- data-vx / data-vy / data-wz are ROS /cmd_vel directions:
-     vx+ = forward, vy+ = left, wz+ = turn left (counter-clockwise). -->
-<div class="pad">
-  <button data-vx="1" data-vy="1">&#8598;</button>
-  <button data-vx="1">&#8593;</button>
-  <button data-vx="1" data-vy="-1">&#8599;</button>
-  <button data-vy="1">&#8592;</button>
-  <button id="stop">&#9632;</button>
-  <button data-vy="-1">&#8594;</button>
-  <button data-vx="-1" data-vy="1">&#8601;</button>
-  <button data-vx="-1">&#8595;</button>
-  <button data-vx="-1" data-vy="-1">&#8600;</button>
-</div>
-<div class="turn">
-  <button data-wz="1">&#10226;</button>
-  <button data-wz="-1">&#10227;</button>
-</div>
+<main>
+<section>
+  <!-- data-vx / data-vy / data-wz are ROS /cmd_vel directions:
+       vx+ = forward, vy+ = left, wz+ = turn left (counter-clockwise). -->
+  <div class="pad">
+    <button data-vx="1" data-vy="1">&#8598;</button>
+    <button data-vx="1">&#8593;</button>
+    <button data-vx="1" data-vy="-1">&#8599;</button>
+    <button data-vy="1">&#8592;</button>
+    <button id="stop">&#9632;</button>
+    <button data-vy="-1">&#8594;</button>
+    <button data-vx="-1" data-vy="1">&#8601;</button>
+    <button data-vx="-1">&#8595;</button>
+    <button data-vx="-1" data-vy="-1">&#8600;</button>
+  </div>
+  <div class="turn">
+    <button data-wz="1">&#10226;</button>
+    <button data-wz="-1">&#10227;</button>
+  </div>
 
-<label>Speed: <span id="sv">60</span>%<input id="speed" type="range" min="20" max="100" value="60"></label>
-<label>Gripper<input id="grip" type="range" min="10" max="90" value="50"></label>
-<button id="lock">Lock</button>
+  <label>Speed: <span id="sv">60</span>%<input id="speed" type="range" min="20" max="100" value="60"></label>
+  <label>Gripper<input id="grip" type="range" min="10" max="90" value="50"></label>
+  <button id="lock" class="wide">Lock</button>
 
-<div class="panel">
-  <span>Battery</span><span id="batt">–</span>
-  <span>WiFi</span><span id="rssi">–</span>
-  <span>Accel m/s²</span><span id="acc">–</span>
-  <span>Gyro rad/s</span><span id="gyr">–</span>
-  <span>Viewers</span><span id="view">–</span>
-</div>
+  <div class="panel">
+    <span>Battery</span><span id="batt">–</span>
+    <span>WiFi</span><span id="rssi">–</span>
+    <span>Accel m/s²</span><span id="acc">–</span>
+    <span>Gyro rad/s</span><span id="gyr">–</span>
+    <span>Gyro bias</span><span id="bias">–</span>
+    <span>Viewers</span><span id="view">–</span>
+  </div>
+</section>
+
+<section class="mapbox">
+  <div class="maprow"><h2>Map</h2><button id="reset">Reset map</button></div>
+  <canvas id="map"></canvas>
+  <div class="maprow"><span id="pose">no pose yet</span><span id="drift"></span></div>
+  <div class="legend">
+    <span id="gridlabel">Grid 5 cm, bold lines 1 m</span>
+    <span><i style="background:var(--free)"></i>driven</span>
+    <span><i style="background:var(--wall)"></i>bump</span>
+    <span><i style="background:var(--path)"></i>path</span>
+  </div>
+</section>
+</main>
 
 <script>
 const $ = id => document.getElementById(id);
@@ -85,6 +114,7 @@ function go(b) {
 }
 function halt(b) {
   if (b) b.classList.remove('on');
+  if (!timer && !b) return;     // not driving: don't fight other /cmd_vel sources
   clearInterval(timer);
   timer = null;
   cmd = STOP;
@@ -103,9 +133,12 @@ speed.oninput = () => $('sv').textContent = speed.value;
 grip.onchange = () => fetch('/grip?angle=' + grip.value);
 lockBtn.onclick = () => fetch('/lock?on=' + (locked ? 0 : 1))
   .then(r => r.ok ? null : r.text().then(t => showStatus('error', t)));
+$('reset').onclick = () => fetch('/reset_map')
+  .then(r => r.ok ? pollMap() : r.text().then(t => showStatus('error', t)));
 
-// ---- Status: poll once a second ----
+// ---- Status: poll four times a second ----
 const fixed = (v, n) => v == null ? '–' : v.toFixed(n);
+let pose = null;
 
 async function poll() {
   let s;
@@ -131,9 +164,152 @@ async function poll() {
   $('rssi').textContent = s.link && s.link.rssi != null ? s.link.rssi + ' dBm' : '–';
   $('acc').textContent = s.imu ? s.imu.accel.map(v => fixed(v, 1)).join('  ') : '–';
   $('gyr').textContent = s.imu ? s.imu.gyro.map(v => fixed(v, 2)).join('  ') : '–';
+  $('bias').textContent = s.slam && s.slam.gyro_bias_deg_s != null
+    ? s.slam.gyro_bias_deg_s.toFixed(2) + ' °/s' : '–';
   $('view').textContent = s.viewers;
+
+  pose = s.pose;
+  if (pose) {
+    const deg = pose.yaw * 180 / Math.PI;
+    $('pose').textContent = `x ${pose.x.toFixed(2)} m · y ${pose.y.toFixed(2)} m · ${deg.toFixed(0)}°`;
+  } else {
+    $('pose').textContent = s.slam ? 'no pose' : 'rover_slam is not running';
+  }
+  const sl = s.slam;
+  $('drift').textContent = sl && sl.position_sigma != null
+    ? `±${Math.round(sl.position_sigma * 100)} cm after ${sl.distance.toFixed(1)} m` : '';
+  drawMap();
 }
 poll();
-setInterval(poll, 1000);
+setInterval(poll, 250);
+
+// ---- Map: fetch when it changes, draw on every pose update ----
+const canvas = $('map'), ctx = canvas.getContext('2d');
+const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+let mapData = null, mapImage = null, path = [], footprint = null, mapVersion = -1;
+
+async function pollMap() {
+  let r;
+  try { r = await fetch('/map?since=' + mapVersion); } catch (e) { return; }
+  if (r.status !== 200) return;
+  const m = await r.json();
+  mapVersion = m.version;
+  path = m.path || [];
+  footprint = m.footprint;
+  mapData = m.map;
+  mapImage = mapData ? cellsToImage(mapData) : null;
+  if (mapData) $('gridlabel').textContent =
+    `Grid ${Math.round(mapData.resolution * 100)} cm, bold lines 1 m`;
+  drawMap();
+}
+setInterval(pollMap, 1000);
+pollMap();
+
+function cellsToImage(m) {
+  // One pixel per cell. Row 0 of the data is the bottom of the map, so flip.
+  const raw = atob(m.cells);
+  const img = new ImageData(m.cols, m.rows);
+  const free = hexRgb(css('--free')), wall = hexRgb(css('--wall'));
+  for (let r = 0; r < m.rows; r++) {
+    for (let c = 0; c < m.cols; c++) {
+      const v = raw.charCodeAt(r * m.cols + c);
+      if (v === 255) continue;                       // unknown: transparent
+      const color = v >= 50 ? wall : free;
+      const i = ((m.rows - 1 - r) * m.cols + c) * 4;
+      img.data[i] = color[0]; img.data[i + 1] = color[1]; img.data[i + 2] = color[2];
+      img.data[i + 3] = 255;
+    }
+  }
+  const off = document.createElement('canvas');
+  off.width = m.cols; off.height = m.rows;
+  off.getContext('2d').putImageData(img, 0, 0);
+  return off;
+}
+
+function hexRgb(hex) {
+  const n = parseInt(hex.slice(1), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+function viewBounds() {
+  // Fit the known area, the path and the rover, with a margin; at least 1 m across.
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  const add = (x, y) => { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); };
+  if (mapData) {
+    add(mapData.x0, mapData.y0);
+    add(mapData.x0 + mapData.cols * mapData.resolution, mapData.y0 + mapData.rows * mapData.resolution);
+  }
+  path.forEach(p => add(p[0], p[1]));
+  if (pose) add(pose.x, pose.y);
+  if (x0 === Infinity) add(0, 0);
+  const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+  const span = Math.max(1.0, x1 - x0 + 0.4, y1 - y0 + 0.4);
+  return { left: cx - span / 2, top: cy + span / 2, span };
+}
+
+function drawMap() {
+  const dpr = window.devicePixelRatio || 1;
+  const size = canvas.clientWidth;
+  if (canvas.width !== Math.round(size * dpr)) {
+    canvas.width = canvas.height = Math.round(size * dpr);
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, size, size);
+
+  const v = viewBounds(), scale = size / v.span;   // px per metre
+  const X = x => (x - v.left) * scale, Y = y => (v.top - y) * scale;
+
+  if (mapImage) {
+    ctx.imageSmoothingEnabled = false;
+    const m = mapData, w = m.cols * m.resolution, h = m.rows * m.resolution;
+    ctx.drawImage(mapImage, X(m.x0), Y(m.y0 + h), w * scale, h * scale);
+  }
+
+  // Grid: a line per cell when they're far enough apart to see, bold every metre.
+  const res = mapData ? mapData.resolution : 0.05;
+  const lines = (step, color, width) => {
+    ctx.strokeStyle = color; ctx.lineWidth = width; ctx.beginPath();
+    for (let x = Math.ceil(v.left / step) * step; x <= v.left + v.span; x += step) {
+      ctx.moveTo(X(x), 0); ctx.lineTo(X(x), size);
+    }
+    for (let y = Math.ceil((v.top - v.span) / step) * step; y <= v.top; y += step) {
+      ctx.moveTo(0, Y(y)); ctx.lineTo(size, Y(y));
+    }
+    ctx.stroke();
+  };
+  if (res * scale >= 4) lines(res, css('--grid'), 1);
+  lines(1.0, css('--grid-major'), 1);
+
+  // Start point.
+  ctx.strokeStyle = css('--muted'); ctx.lineWidth = 1.5; ctx.beginPath();
+  ctx.moveTo(X(0) - 6, Y(0)); ctx.lineTo(X(0) + 6, Y(0));
+  ctx.moveTo(X(0), Y(0) - 6); ctx.lineTo(X(0), Y(0) + 6);
+  ctx.stroke();
+
+  if (path.length > 1) {
+    ctx.strokeStyle = css('--path'); ctx.lineWidth = 2; ctx.lineJoin = 'round'; ctx.beginPath();
+    path.forEach((p, i) => i ? ctx.lineTo(X(p[0]), Y(p[1])) : ctx.moveTo(X(p[0]), Y(p[1])));
+    if (pose) ctx.lineTo(X(pose.x), Y(pose.y));
+    ctx.stroke();
+  }
+
+  if (pose) {
+    const c = Math.cos(pose.yaw), s = Math.sin(pose.yaw);
+    const toWorld = (bx, by) => [pose.x + bx * c - by * s, pose.y + bx * s + by * c];
+    const fp = footprint || [[0.07, 0.06], [-0.07, 0.06], [-0.07, -0.06], [0.07, -0.06]];
+    ctx.fillStyle = css('--rover'); ctx.globalAlpha = 0.85; ctx.beginPath();
+    fp.forEach((p, i) => {
+      const [wx, wy] = toWorld(p[0], p[1]);
+      i ? ctx.lineTo(X(wx), Y(wy)) : ctx.moveTo(X(wx), Y(wy));
+    });
+    ctx.closePath(); ctx.fill(); ctx.globalAlpha = 1;
+    // Heading arrow from the centre past the front edge.
+    const front = Math.max(...fp.map(p => p[0]));
+    const [tx, ty] = toWorld(front + 0.05, 0);
+    ctx.strokeStyle = css('--fg'); ctx.lineWidth = 2; ctx.beginPath();
+    ctx.moveTo(X(pose.x), Y(pose.y)); ctx.lineTo(X(tx), Y(ty)); ctx.stroke();
+  }
+}
+window.addEventListener('resize', drawMap);
 </script>
 </body></html>

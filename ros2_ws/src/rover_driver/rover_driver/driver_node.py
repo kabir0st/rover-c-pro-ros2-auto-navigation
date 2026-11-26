@@ -11,6 +11,9 @@ Publishes
   /rover/imu/temperature  sensor_msgs/Temperature, 1 Hz
   /rover/battery          sensor_msgs/BatteryState, 1 Hz (the stick's battery)
   /rover/locked           std_msgs/Bool, latched, published on change
+  /rover/cmd_applied      geometry_msgs/TwistStamped, 20 Hz: the velocity the rover was
+                          actually told to do (after clipping and wheel mixing, zero while
+                          locked or disconnected). Dead reckoning uses this.
   /diagnostics            diagnostic_msgs/DiagnosticArray, 1 Hz
 Services
   /rover/set_locked       std_srvs/SetBool, same as pressing button A on the stick
@@ -106,6 +109,7 @@ class RoverDriver(Node):
         self._battery_pub = self.create_publisher(BatteryState, 'rover/battery', 10)
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self._locked_pub = self.create_publisher(Bool, 'rover/locked', latched)
+        self._applied_pub = self.create_publisher(TwistStamped, 'rover/cmd_applied', 10)
         self._diag_pub = self.create_publisher(DiagnosticArray, '/diagnostics', 10)
 
         if stamped:
@@ -155,6 +159,14 @@ class RoverDriver(Node):
     # ---------- UDP thread ----------
 
     def _io_loop(self):
+        try:
+            self._io_loop_inner()
+        except Exception:
+            if self._running and self.context.ok():
+                raise
+            # Shutting down: ROS stopped (publishing fails) or close() closed the socket.
+
+    def _io_loop_inner(self):
         next_send = time.monotonic()
         while self._running:
             now = time.monotonic()
@@ -205,6 +217,8 @@ class RoverDriver(Node):
                 flags = self._lock_flags
                 self._lock_repeats -= 1
             grip = self._grip
+            t = self._telemetry
+            connected = now - self._last_rx < LINK_TIMEOUT
         self._seq = (self._seq + 1) & 0xFFFF
         # ROS: x forward, y left, z counter-clockwise.
         # RoverC: x right, y forward, z counter-clockwise.
@@ -217,6 +231,16 @@ class RoverDriver(Node):
             flags=flags,
         )
         self._send(cmd)
+
+        applied = TwistStamped()
+        applied.header.stamp = self.get_clock().now().to_msg()
+        applied.header.frame_id = 'base_link'
+        if connected and t is not None and not t.locked:
+            ex, ey, ez = protocol.effective_speeds(cmd.x, cmd.y, cmd.z)
+            applied.twist.linear.x = ey / 100.0 * self._max_linear
+            applied.twist.linear.y = -ex / 100.0 * self._max_linear
+            applied.twist.angular.z = ez / 100.0 * self._max_angular
+        self._applied_pub.publish(applied)
 
     def _send(self, cmd: protocol.Command):
         try:
@@ -355,7 +379,8 @@ class RoverDriver(Node):
 
     def close(self):
         self._running = False
-        self._io_thread.join(timeout=1.0)
+        # Short wait: the thread may be stuck in a hostname lookup for a rover that's off.
+        self._io_thread.join(timeout=0.3)
         if self._addr is not None:
             # Stop now rather than waiting for the rover's 0.5 s timeout.
             self._send(protocol.Command(seq=(self._seq + 1) & 0xFFFF, x=0, y=0, z=0))
@@ -369,6 +394,10 @@ def main(args=None):
         rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
+    except Exception:
+        if rclpy.ok():
+            raise
+        # SIGTERM shut ROS down mid-spin and rclpy raised instead: a normal exit.
     finally:
         node.close()
         node.destroy_node()

@@ -1,0 +1,20 @@
+rover_slam:
+  ros__parameters:
+    resolution: 0.05          # m per map cell
+    map_size: 10.0            # m; square map centred on where the rover starts
+    # Rover footprint, for marking the cells it drives over. Measure yours.
+    footprint_length: 0.14    # m, front to back
+    footprint_width: 0.12     # m, side to side
+    # Speed calibration. Odometry trusts the commanded speed, so drive a known
+    # distance (drive_rectangle), measure it, and set
+    #   new scale = old scale * real distance / distance the odometry reports.
+    linear_scale: 1.0         # forward/back
+    lateral_scale: 1.0        # sideways; mecanum strafing usually covers less ground
+    odom_frame: odom
+    base_frame: base_link
+    publish_tf: true
+    # A hard jolt while driving steadily marks an obstacle ahead. Raise the
+    # threshold if bumps show up where there's nothing; lower it if real hits are missed.
+    bump_detection: true
+    bump_threshold: 8.0       # m/s^2, horizontal
+    still_delay: 0.3          # s after the last move command before gyro bias learning resumes

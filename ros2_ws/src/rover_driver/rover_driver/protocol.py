@@ -80,6 +80,32 @@ class Telemetry:
         return bool(self.flags & TLM_FLAG_IMU_OK)
 
 
+def wheel_speeds(x: int, y: int, z: int) -> tuple:
+    """Wheel powers the rover sets for a command: M5_RoverC::setSpeed, line by line.
+
+    Order: front-left, front-right, rear-left, rear-right.
+    """
+    if z != 0:
+        x = int(x * (100 - abs(z)) / 100)
+        y = int(y * (100 - abs(z)) / 100)
+
+    def clamp(v):
+        return max(-100, min(100, v))
+
+    return clamp(y + x - z), clamp(y - x + z), clamp(y - x - z), clamp(y + x + z)
+
+
+def effective_speeds(x: int, y: int, z: int) -> tuple:
+    """What the rover really does for a command, as (x, y, z) in -100..100.
+
+    Goes through the wheel mixing above, so it includes the library's turn
+    scaling and the per-wheel clipping (a full-power diagonal only drives two
+    wheels, for example).
+    """
+    fl, fr, rl, rr = wheel_speeds(x, y, z)
+    return (fl - fr - rl + rr) / 4, (fl + fr + rl + rr) / 4, (-fl + fr - rl + rr) / 4
+
+
 def pack_command(cmd: Command) -> bytes:
     return _COMMAND.pack(b'RC', PROTOCOL_VERSION, cmd.flags, cmd.seq & 0xFFFF,
                          cmd.x, cmd.y, cmd.z, cmd.grip)

@@ -29,6 +29,18 @@ def test_telemetry_round_trip():
         (4012, -150, -1, -1, -61)
 
 
+def test_effective_speeds():
+    # Straight lines and pure turns come through unchanged.
+    assert protocol.effective_speeds(0, 50, 0) == (0, 50, 0)
+    assert protocol.effective_speeds(-30, 0, 0) == (-30, 0, 0)
+    assert protocol.effective_speeds(0, 0, 40) == (0, 0, 40)
+    # A full-power diagonal clips: only two wheels drive, so each axis gets half.
+    assert protocol.wheel_speeds(100, 100, 0) == (100, 0, 0, 100)
+    assert protocol.effective_speeds(100, 100, 0) == (50, 50, 0)
+    # Turning while driving: the library scales the drive part down by |z|.
+    assert protocol.effective_speeds(0, 100, 50) == (0, 50, 50)
+
+
 def test_rejects_wrong_packets():
     good = protocol.pack_command(protocol.Command(seq=1, x=0, y=0, z=0))
     assert protocol.unpack_command(good[:-1]) is None
